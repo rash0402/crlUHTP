@@ -2,6 +2,7 @@
 Main Control Loop for UHTP
 
 1kHz real-time control loop with zero-allocation design.
+Supports SoS, CIT, and Fitts tasks.
 """
 
 """
@@ -13,6 +14,10 @@ mutable struct ControlLoop
     sender::UDPSender
     auto_pd::AutoPDDevice
 
+    # Current task (Union for flexibility)
+    current_task::Union{SoSTask, CITTask, FittsTask, Nothing}
+    task_type::TaskType
+
     # Performance metrics
     loop_times_us::Vector{Float64}
     max_loop_time_us::Float64
@@ -20,24 +25,56 @@ mutable struct ControlLoop
 end
 
 """
-    ControlLoop(config=default_config()) -> ControlLoop
+    ControlLoop(config=default_config(); task_type=TASK_TYPE_SOS) -> ControlLoop
 
-Create control loop with configuration.
+Create control loop with configuration and task type.
 """
-function ControlLoop(config::ExperimentConfig=default_config())
+function ControlLoop(config::ExperimentConfig=default_config(); task_type::TaskType=TASK_TYPE_SOS)
     sender = UDPSender(config.udp_dest_ip, config.udp_dest_port)
     state = ExperimentState()
     auto_pd = AutoPDDevice()
+
+    # Create task based on type
+    task = create_task(task_type)
 
     return ControlLoop(
         config,
         state,
         sender,
         auto_pd,
+        task,
+        task_type,
         Float64[],
         0.0,
         0
     )
+end
+
+"""
+    create_task(task_type::TaskType) -> AbstractTask
+
+Create a task instance based on type.
+"""
+function create_task(task_type::TaskType)
+    if task_type == TASK_TYPE_SOS
+        return SoSTask()
+    elseif task_type == TASK_TYPE_CIT
+        return CITTask()
+    elseif task_type == TASK_TYPE_FITTS
+        return FittsTask()
+    else
+        return SoSTask()  # Default
+    end
+end
+
+"""
+    set_task!(loop::ControlLoop, task_type::TaskType)
+
+Change current task.
+"""
+function set_task!(loop::ControlLoop, task_type::TaskType)
+    loop.task_type = task_type
+    loop.current_task = create_task(task_type)
 end
 
 """
@@ -52,24 +89,56 @@ function step!(loop::ControlLoop)
     update_time!(loop.state)
     loop.state.loop_count += 1
 
-    # 2. Get input (Auto-PD for now)
-    set_target!(loop.auto_pd, loop.state.target_x, loop.state.target_y)
-    input = compute_input(loop.auto_pd, loop.state.cursor)
-    loop.state.last_input = input
+    # 2. Get target from task
+    if !isnothing(loop.current_task)
+        t_sec = loop.state.current_time_us / 1e6
+        tx, ty = get_target(loop.current_task, t_sec)
+        loop.state.target_x = tx
+        loop.state.target_y = ty
+    end
 
-    # 3. Physics update
-    loop.state.cursor = step_rk4(
-        loop.state.cursor,
-        loop.config.physics,
-        input,
-        loop.config.dt
-    )
+    # 3. Get input
+    if loop.task_type == TASK_TYPE_CIT && !isnothing(loop.current_task)
+        # CIT: Input controls CIT dynamics directly
+        set_target!(loop.auto_pd, 0.0, 0.0)  # Target is origin for CIT
+        cit_task = loop.current_task::CITTask
+        cit_cx, cit_cy = get_cit_state(cit_task)
+        # Create pseudo-state for Auto-PD
+        cit_state = State2D(cit_cx, cit_cy, 0.0, 0.0)
+        input = compute_input(loop.auto_pd, cit_state)
+        loop.state.last_input = input
 
-    # 4. Send UDP message
+        # Update CIT dynamics
+        update_with_input!(cit_task, input, loop.config.dt)
+
+        # Sync CIT state to main state for display
+        loop.state.cursor = State2D(cit_cx, cit_cy, 0.0, 0.0)
+    else
+        # SoS/Fitts: Normal physics with Auto-PD tracking target
+        set_target!(loop.auto_pd, loop.state.target_x, loop.state.target_y)
+        input = compute_input(loop.auto_pd, loop.state.cursor)
+        loop.state.last_input = input
+
+        # Physics update
+        loop.state.cursor = step_rk4(
+            loop.state.cursor,
+            loop.config.physics,
+            input,
+            loop.config.dt
+        )
+    end
+
+    # 4. Update task state
+    if !isnothing(loop.current_task)
+        task_status = update!(loop.current_task, loop.state.cursor, loop.config.dt)
+        loop.state.task_state = task_status
+    end
+
+    # 5. Send UDP message
     msg = to_message(loop.state)
     send!(loop.sender, msg)
 
-    # 5. Performance tracking
+    # 6. Performance tracking
     t_end = time_ns()
     loop_time_us = (t_end - t_start) / 1000.0
     loop.max_loop_time_us = max(loop.max_loop_time_us, loop_time_us)
@@ -78,7 +147,6 @@ function step!(loop::ControlLoop)
         push!(loop.loop_times_us, loop_time_us)
     end
 
-    # Check for overrun (> 900μs is risky for 1ms loop)
     if loop_time_us > 900.0
         loop.overrun_count += 1
     end
@@ -93,6 +161,10 @@ Run control loop for specified duration.
 """
 function run!(loop::ControlLoop, duration_s::Float64)
     reset!(loop.state)
+    if !isnothing(loop.current_task)
+        reset!(loop.current_task)
+    end
+
     loop.state.running = true
     loop.state.task_state = TASK_RUNNING
     loop.state.trial_number = 1
@@ -100,7 +172,9 @@ function run!(loop::ControlLoop, duration_s::Float64)
     target_dt_ns = round(UInt64, loop.config.dt * 1e9)
     end_time_ns = time_ns() + round(UInt64, duration_s * 1e9)
 
+    task_name = string(loop.task_type)
     println("Starting control loop at $(loop.config.control_rate_hz) Hz...")
+    println("Task: $task_name")
     println("Duration: $(duration_s) s")
     println("Press Ctrl+C to stop")
 
@@ -111,14 +185,15 @@ function run!(loop::ControlLoop, duration_s::Float64)
             # Execute one step
             step!(loop)
 
-            # Wait for next period
-            elapsed_ns = time_ns() - t_loop_start
-            if elapsed_ns < target_dt_ns
-                sleep_ns = target_dt_ns - elapsed_ns
-                # Busy wait for precision (sleep() is too coarse)
-                while time_ns() - t_loop_start < target_dt_ns
-                    # Spin
-                end
+            # Check if task completed early
+            if !isnothing(loop.current_task) && is_complete(loop.current_task)
+                println("\nTask completed!")
+                break
+            end
+
+            # Wait for next period (busy wait for precision)
+            while time_ns() - t_loop_start < target_dt_ns
+                # Spin
             end
         end
     catch e
@@ -129,7 +204,9 @@ function run!(loop::ControlLoop, duration_s::Float64)
         end
     finally
         loop.state.running = false
-        loop.state.task_state = TASK_COMPLETED
+        if loop.state.task_state == TASK_RUNNING
+            loop.state.task_state = TASK_COMPLETED
+        end
     end
 
     # Print statistics
@@ -145,6 +222,7 @@ function print_stats(loop::ControlLoop)
     println("\n" * "=" ^ 50)
     println("  Control Loop Statistics")
     println("=" ^ 50)
+    println("Task: $(loop.task_type)")
     println("Total loops: $(loop.state.loop_count)")
     println("Max loop time: $(round(loop.max_loop_time_us, digits=1)) μs")
 
@@ -161,6 +239,21 @@ function print_stats(loop::ControlLoop)
     s = stats(loop.sender)
     println("UDP packets sent: $(s.send_count)")
     println("UDP errors: $(s.error_count)")
+
+    # Print task metrics
+    if !isnothing(loop.current_task)
+        println("\n" * "-" ^ 50)
+        println("  Task Metrics")
+        println("-" ^ 50)
+        metrics = get_metrics(loop.current_task)
+        for (k, v) in pairs(metrics)
+            if v isa Float64
+                println("$k: $(round(v, digits=4))")
+            else
+                println("$k: $v")
+            end
+        end
+    end
 end
 
 """
