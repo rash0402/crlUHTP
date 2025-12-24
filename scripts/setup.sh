@@ -74,6 +74,7 @@ authors = ["AI-DLC Team"]
 version = "0.1.0"
 
 [deps]
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
 
@@ -89,7 +90,7 @@ echo -e "  Checking Julia packages..."
 PACKAGES_INSTALLED=$("$JULIA_PATH" --project=julia -e '
     using Pkg
     deps = Pkg.dependencies()
-    required = ["StaticArrays", "YAML"]
+    required = ["Sockets", "StaticArrays", "YAML"]
     missing = String[]
     for pkg in required
         found = false
