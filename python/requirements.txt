@@ -1,0 +1,7 @@
+# UHTP Python Dependencies
+vispy>=0.14.0
+pygame>=2.5.0
+pyqt6>=6.6.0
+h5py>=3.10.0
+numpy>=1.26.0
+pyyaml>=6.0.1
