@@ -26,7 +26,7 @@ class RenderConfig:
     cursor_radius: int = 10
     target_radius: int = 15
     # World to screen scaling (meters to pixels)
-    scale: float = 2000.0  # 1m = 2000 pixels
+    scale: float = 1000.0  # 1m = 1000 pixels (fits ±300mm on screen)
     # Origin offset (center of screen)
     origin_x: int = 640
     origin_y: int = 360
@@ -186,21 +186,23 @@ class Renderer:
         """Draw coordinate grid."""
         grid_color = (50, 50, 60)
 
-        # Vertical lines (every 5cm)
+        # Vertical lines (every 10cm)
         for i in range(-10, 11):
-            x = self.config.origin_x + int(i * 0.05 * self.config.scale)
-            pygame.draw.line(
-                self.screen, grid_color,
-                (x, 0), (x, self.config.height), 1
-            )
+            x = self.config.origin_x + int(i * 0.1 * self.config.scale)
+            if 0 <= x <= self.config.width:
+                pygame.draw.line(
+                    self.screen, grid_color,
+                    (x, 0), (x, self.config.height), 1
+                )
 
-        # Horizontal lines
+        # Horizontal lines (every 10cm)
         for i in range(-5, 6):
-            y = self.config.origin_y - int(i * 0.05 * self.config.scale)
-            pygame.draw.line(
-                self.screen, grid_color,
-                (0, y), (self.config.width, y), 1
-            )
+            y = self.config.origin_y - int(i * 0.1 * self.config.scale)
+            if 0 <= y <= self.config.height:
+                pygame.draw.line(
+                    self.screen, grid_color,
+                    (0, y), (self.config.width, y), 1
+                )
 
         # Origin axes
         axis_color = (80, 80, 100)
